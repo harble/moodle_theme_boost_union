@@ -1305,7 +1305,7 @@ function theme_boost_union_get_course_header_image_url() {
     switch ($courseheaderimagesource) {
         case THEME_BOOST_UNION_SETTING_COURSEHEADERIMAGESOURCE_COURSEPLUSGLOBAL:
             // Try course overview files first, then global fallback.
-            $courseimage = \core_course\external\course_summary_exporter::get_course_image($PAGE->course);
+            $courseimage = theme_boost_union_get_course_overview_header_image_url($PAGE->course);
             if ($courseimage) {
                 return $courseimage;
             }
@@ -1314,7 +1314,7 @@ function theme_boost_union_get_course_header_image_url() {
 
         case THEME_BOOST_UNION_SETTING_COURSEHEADERIMAGESOURCE_COURSENOGLOBAL:
             // Only course image, no fallback.
-            return \core_course\external\course_summary_exporter::get_course_image($PAGE->course);
+            return theme_boost_union_get_course_overview_header_image_url($PAGE->course);
 
         case THEME_BOOST_UNION_SETTING_COURSEHEADERIMAGESOURCE_DEDICATEDPLUSGLOBAL:
             // Try dedicated course images first, then global fallback.
@@ -1336,7 +1336,7 @@ function theme_boost_union_get_course_header_image_url() {
                 return $dedicatedimage;
             }
             // Then try course overview files.
-            $courseimage = \core_course\external\course_summary_exporter::get_course_image($PAGE->course);
+            $courseimage = theme_boost_union_get_course_overview_header_image_url($PAGE->course);
             if ($courseimage) {
                 return $courseimage;
             }
@@ -1350,13 +1350,90 @@ function theme_boost_union_get_course_header_image_url() {
                 return $dedicatedimage;
             }
             // Then try course overview files, no fallback.
-            return \core_course\external\course_summary_exporter::get_course_image($PAGE->course);
+            return theme_boost_union_get_course_overview_header_image_url($PAGE->course);
 
         case THEME_BOOST_UNION_SETTING_COURSEHEADERIMAGESOURCE_GLOBAL:
         default:
             // Only global image.
             return theme_boost_union_get_global_course_header_image_url();
     }
+}
+
+/**
+ * Resolve the CDN URL of a stored file if it was archived to central storage.
+ *
+ * When a course cover / header image is uploaded, the original image is stored on a CDN
+ * while only a small thumbnail is kept locally. This helper reads the file's source metadata
+ * and returns the CDN URL of the high-resolution original, if available.
+ *
+ * @param \stored_file $file The stored file.
+ * @return string|null The CDN URL, or null if it cannot be resolved.
+ */
+function theme_boost_union_get_stored_file_cdn_url(\stored_file $file) {
+    global $CFG;
+
+    // Ensure the central storage repository locallib is available.
+    $centralstoragelib = $CFG->dirroot . '/repository/centralstorage/locallib.php';
+    if (!is_readable($centralstoragelib)) {
+        return null;
+    }
+    require_once($centralstoragelib);
+    if (!function_exists('repository_centralstorage_public_url')) {
+        return null;
+    }
+
+    // Read the source metadata of the file.
+    $sourcemetadata = json_decode((string)$file->get_source(), true);
+    if (!is_array($sourcemetadata)
+        || ($sourcemetadata['storage'] ?? '') !== 'centralstorage_cdn'
+        || empty($sourcemetadata['source'])) {
+        return null;
+    }
+
+    $cdnurl = repository_centralstorage_public_url((string)$sourcemetadata['source'], 'cloudflare', 'image');
+    $scheme = strtolower((string)parse_url($cdnurl, PHP_URL_SCHEME));
+    if (!in_array($scheme, ['http', 'https'], true)) {
+        return null;
+    }
+
+    return $cdnurl;
+}
+
+/**
+ * Get the course header image URL from the course overview files.
+ *
+ * This resolution tries the CDN original image first and only falls back to the
+ * local pluginfile URL (e.g. the local thumbnail) when no CDN source is available.
+ * It is implemented inside this theme so that no core file needs to be altered.
+ *
+ * @param \stdClass $course The course.
+ * @return core\url|null The URL to the course image or null if none is available.
+ */
+function theme_boost_union_get_course_overview_header_image_url($course) {
+    // Build a course list element to be able to access the overview files.
+    $coursefull = new \core_course_list_element($course);
+
+    foreach ($coursefull->get_course_overviewfiles() as $file) {
+        // Priority 1: resolve the CDN original image.
+        $cdnurl = theme_boost_union_get_stored_file_cdn_url($file);
+        if ($cdnurl !== null) {
+            return new core\url($cdnurl);
+        }
+
+        // Priority 2: fall back to the local pluginfile URL.
+        if ($file->is_valid_image()) {
+            return core\url::make_pluginfile_url(
+                $file->get_contextid(),
+                $file->get_component(),
+                $file->get_filearea(),
+                null,
+                $file->get_filepath(),
+                $file->get_filename()
+            );
+        }
+    }
+
+    return null;
 }
 
 /**
@@ -1424,6 +1501,13 @@ function theme_boost_union_get_dedicated_course_header_image_url($courseid) {
 
     // If we have a file, build and return the image URL.
     if ($file) {
+        // Priority 1: resolve the CDN original image.
+        $cdnurl = theme_boost_union_get_stored_file_cdn_url($file);
+        if ($cdnurl !== null) {
+            return new core\url($cdnurl);
+        }
+
+        // Priority 2: fall back to the local pluginfile URL.
         return core\url::make_pluginfile_url(
             $file->get_contextid(),
             $file->get_component(),
